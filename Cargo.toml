@@ -1,0 +1,30 @@
+[package]
+name = "audioqueue"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+symphonia = { version = "0.5.4", features = ["all"] }
+clap = { version = "4.4", features = ["derive"] }
+tokio = { version = "1.0", features = ["full"] }
+rodio = "0.18"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+colored = "2.0"
+reqwest = { version = "0.11", features = ["json"] }
+
+[dev-dependencies]
+tempfile = "3.8"
+tokio-test = "0.4"
+mockall = "0.12"
+criterion = "0.5"
+
+[[bin]]
+name = "audioqueue"
+path = "src/main.rs"
+
+[lib]
+name = "audioqueue"
+path = "src/lib.rs"
+
