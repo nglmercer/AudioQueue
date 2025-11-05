@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::path::Path;
 use anyhow::{Result, anyhow};
-use rodio::{OutputStream, OutputStreamHandle, Sink, Decoder};
+use rodio::{OutputStream, OutputStreamHandle, Sink, Decoder, Source};
 use std::io::BufReader;
 use tokio::sync::mpsc::{self, Sender, Receiver};
 
@@ -45,6 +45,8 @@ impl AudioEmitter {
         let (stream, stream_handle) = OutputStream::try_default()
             .map_err(|e| anyhow!("Failed to create audio output stream: {}", e))?;
 
+        println!("Audio stream initialized successfully");
+
         Ok(Self {
             state: EmitterState::Stopped,
             volume: 1.0,
@@ -71,6 +73,12 @@ impl AudioEmitter {
             return Err(anyhow!("File does not exist: {}", path_str));
         }
 
+        // Stop any existing playback first
+        if let Some(old_sink) = &self.sink {
+            old_sink.lock().unwrap().stop();
+            old_sink.lock().unwrap().empty();
+        }
+
         // Open the file with rodio
         let file = std::fs::File::open(path)
             .map_err(|e| anyhow!("Failed to open file {}: {}", path_str, e))?;
@@ -82,6 +90,8 @@ impl AudioEmitter {
                     let sink = Sink::try_new(stream_handle)
                         .map_err(|e| anyhow!("Failed to create audio sink: {}", e))?;
 
+                    // Ensure sink is stopped before appending
+                    sink.stop();
                     sink.set_volume(self.volume);
                     sink.append(source);
 
@@ -121,7 +131,12 @@ impl AudioEmitter {
                 return Err(anyhow!("No audio loaded or audio finished"));
             } else {
                 drop(sink_guard);
-                self.sink.as_ref().unwrap().lock().unwrap().play();
+                // Ensure sink is playing and not stopped
+                let sink = self.sink.as_ref().unwrap().lock().unwrap();
+                if sink.is_paused() {
+                    sink.play();
+                }
+                drop(sink);
                 self.state = EmitterState::Playing;
                 println!("Started playback");
             }
@@ -145,7 +160,10 @@ impl AudioEmitter {
 
     pub fn stop(&mut self) -> Result<()> {
         if let Some(sink) = &self.sink {
-            sink.lock().unwrap().stop();
+            let sink_guard = sink.lock().unwrap();
+            sink_guard.stop();
+            sink_guard.empty(); // Clear the sink to prevent old audio from playing
+            drop(sink_guard);
             self.state = EmitterState::Stopped;
             self.position = 0.0;
             println!("Stopped playback");
@@ -204,6 +222,8 @@ impl AudioEmitter {
                     if let Err(e) = self.load_file(&file_path) {
                         eprintln!("Error loading file {}: {}", file_path, e);
                     } else {
+                        // Small delay to ensure audio is loaded
+                        std::thread::sleep(std::time::Duration::from_millis(50));
                         if let Err(e) = self.play() {
                             eprintln!("Error playing file {}: {}", file_path, e);
                         }

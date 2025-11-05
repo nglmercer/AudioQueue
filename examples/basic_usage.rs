@@ -106,14 +106,17 @@ fn main() -> Result<()> {
                         Ok(_) => {
                             println!("Playback started successfully");
 
-                            // Let it play for a few seconds
-                            println!("Playing for 3 seconds...");
-                            std::thread::sleep(std::time::Duration::from_secs(3));
-                            println!("Finished playing");
-
-                            // Stop playback
-                            emitter.stop()?;
-                            println!("Playback stopped.");
+                            // THIS IS THE CORRECT WAY - use play_and_wait()
+                            // This keeps the process alive until audio finishes
+                            println!("Playing until track completes... (Press Ctrl+C to stop)");
+                            match emitter.play_and_wait() {
+                                Ok(_) => {
+                                    println!("✅ Track finished playing!");
+                                }
+                                Err(e) => {
+                                    eprintln!("❌ Error during playback: {}", e);
+                                }
+                            }
                         }
                         Err(e) => {
                             eprintln!("Error starting playback: {}", e);

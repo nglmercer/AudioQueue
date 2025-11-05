@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
+use tokio::io::AsyncBufReadExt;
 
 mod audio_queue;
 mod audio_emitter;
@@ -73,6 +74,10 @@ enum Commands {
     },
     /// Start the daemon/service that manages playback
     Start,
+    /// Play without blocking (for CLI usage)
+    PlayNonBlocking,
+    /// Start interactive mode
+    Interactive,
 }
 
 struct AudioQueueManager {
@@ -186,13 +191,24 @@ impl AudioQueueManager {
     }
 
     async fn handle_add(&self, file: PathBuf, position: Option<usize>) -> Result<()> {
+        // Convert to absolute path before validation
+        let absolute_file = if file.is_absolute() {
+            file
+        } else {
+            std::env::current_dir()
+                .context("Failed to get current directory")?
+                .join(&file)
+                .canonicalize()
+                .context("Failed to canonicalize path")?
+        };
+
         // Validate audio file
-        if !AudioQueue::validate_audio_file(&file)? {
-            return Err(anyhow::anyhow!("File is not a valid audio file: {}", file.display()));
+        if !AudioQueue::validate_audio_file(&absolute_file)? {
+            return Err(anyhow::anyhow!("File is not a valid audio file: {}", absolute_file.display()));
         }
 
-        // Extract metadata
-        let track = AudioQueue::extract_metadata(&file)?;
+        // Extract metadata (will also convert to absolute)
+        let track = AudioQueue::extract_metadata(&absolute_file)?;
 
         // Add to queue
         self.queue_sender.send(QueueCommand::Add(track, position)).await?;
@@ -203,7 +219,7 @@ impl AudioQueueManager {
         // Save state after modification
         self.save_state().await?;
 
-        println!("Added {} to queue", file.display());
+        println!("Added {} to queue", absolute_file.display());
 
         // Show updated queue
         self.handle_list().await?;
@@ -249,74 +265,228 @@ impl AudioQueueManager {
     }
 
     async fn handle_play(&self) -> Result<()> {
-        // Send command to queue processor
+        // First update queue state to ensure we have a current track
         self.queue_sender.send(QueueCommand::Play).await?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Wait for the processor to handle the command
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Also handle audio playback directly
+        // Get the current track from the queue
         let queue = self.queue.lock().await;
         if let Some(track) = queue.get_current_track() {
             let file_path = track.path.to_string_lossy().to_string();
             drop(queue);
 
-            // Use local emitter for audio playback
-            let mut emitter = AudioEmitter::new()?;
+            // Use the shared emitter for audio playback
+            let mut emitter = self.emitter.lock().await;
+
+            // Stop current playback and load new file
+            if let Err(e) = emitter.stop() {
+                eprintln!("Warning: Could not stop previous playback: {}", e);
+            }
+
             if let Err(e) = emitter.load_file(&file_path) {
                 eprintln!("Error loading file {}: {}", file_path, e);
-            } else if let Err(e) = emitter.play() {
-                eprintln!("Error playing file {}: {}", file_path, e);
+                return Err(e);
+            }
+
+            // Start playback
+            if let Err(e) = emitter.play() {
+                eprintln!("Error starting playback for file {}: {}", file_path, e);
+                return Err(e);
             } else {
-                println!("Now playing: {}", file_path);
+                println!("🎵 Now playing: {}", file_path);
             }
         } else {
             println!("No current track to play");
+            return Err(anyhow::anyhow!("Queue is empty - no track to play"));
         }
 
-        println!("Starting playback");
+        // Save state after starting playback
+        self.save_state().await?;
+
+        Ok(())
+    }
+
+    async fn handle_interactive(&self) -> Result<()> {
+        println!("🎵 AudioQueue Interactive Mode");
+        println!("Available commands: play, pause, resume, stop, next, previous, status, volume <0.0-1.0>, list, clear, quit");
+        println!("Type 'quit' to exit");
+
+        let stdin = tokio::io::stdin();
+        let mut reader = tokio::io::BufReader::new(stdin);
+        let mut line = String::new();
+
+        loop {
+            print!("audioqueue> ");
+            use std::io::Write;
+            std::io::stdout().flush().unwrap();
+
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    let command = line.trim();
+                    match command {
+                        "quit" | "exit" => {
+                            println!("Goodbye!");
+                            if let Err(e) = self.emitter.lock().await.stop() {
+                                eprintln!("Error stopping playback: {}", e);
+                            }
+                            break;
+                        }
+                        "play" => {
+                            if let Err(e) = self.handle_play().await {
+                                eprintln!("Error: {}", e);
+                            }
+                        }
+                        "pause" => {
+                            if let Err(e) = self.handle_pause().await {
+                                eprintln!("Error: {}", e);
+                            }
+                        }
+                        "resume" => {
+                            if let Err(e) = self.handle_resume().await {
+                                eprintln!("Error: {}", e);
+                            }
+                        }
+                        "stop" => {
+                            if let Err(e) = self.emitter.lock().await.stop() {
+                                eprintln!("Error: {}", e);
+                            } else {
+                                println!("Stopped playback");
+                            }
+                        }
+                        "next" => {
+                            if let Err(e) = self.handle_next().await {
+                                eprintln!("Error: {}", e);
+                            }
+                        }
+                        "previous" => {
+                            if let Err(e) = self.handle_previous().await {
+                                eprintln!("Error: {}", e);
+                            }
+                        }
+                        "status" => {
+                            if let Err(e) = self.handle_status().await {
+                                eprintln!("Error: {}", e);
+                            }
+                        }
+                        "list" => {
+                            if let Err(e) = self.handle_list().await {
+                                eprintln!("Error: {}", e);
+                            }
+                        }
+                        "clear" => {
+                            if let Err(e) = self.handle_clear().await {
+                                eprintln!("Error: {}", e);
+                            }
+                        }
+                        cmd if cmd.starts_with("volume") => {
+                            let parts: Vec<&str> = cmd.split_whitespace().collect();
+                            if parts.len() == 2 {
+                                if let Ok(level) = parts[1].parse::<f32>() {
+                                    if let Err(e) = self.handle_volume(level).await {
+                                        eprintln!("Error: {}", e);
+                                    }
+                                } else {
+                                    eprintln!("Invalid volume level. Use 0.0 to 1.0");
+                                }
+                            } else {
+                                eprintln!("Usage: volume <0.0-1.0>");
+                            }
+                        }
+                        cmd if cmd.starts_with("add") => {
+                            let parts: Vec<&str> = cmd.split_whitespace().collect();
+                            if parts.len() == 2 {
+                                let path = PathBuf::from(parts[1]);
+                                if let Err(e) = self.handle_add(path, None).await {
+                                    eprintln!("Error: {}", e);
+                                }
+                            } else {
+                                eprintln!("Usage: add <file_path>");
+                            }
+                        }
+                        _ => {
+                            eprintln!("Unknown command: {}", command);
+                            println!("Available commands: play, pause, resume, stop, next, previous, status, volume <0.0-1.0>, list, add <file>, clear, quit");
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error reading input: {}", e);
+                    break;
+                }
+            }
+        }
+
         Ok(())
     }
 
     async fn handle_pause(&self) -> Result<()> {
-        self.queue_sender.send(QueueCommand::Pause).await?;
+        // Pause the emitter directly
+        if let Err(e) = self.emitter.lock().await.pause() {
+            eprintln!("Error pausing: {}", e);
+            return Err(e);
+        } else {
+            println!("Paused playback");
+        }
 
-        // Wait for the processor to handle the command
+        // Update queue state
+        self.queue_sender.send(QueueCommand::Pause).await?;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Save state after modification
         self.save_state().await?;
 
-        if let Err(e) = self.emitter.lock().await.pause() {
-            eprintln!("Error pausing: {}", e);
-        } else {
-            println!("Paused playback");
-        }
         Ok(())
     }
 
     async fn handle_resume(&self) -> Result<()> {
-        self.queue_sender.send(QueueCommand::Resume).await?;
+        // Resume the emitter directly
+        if let Err(e) = self.emitter.lock().await.resume() {
+            eprintln!("Error resuming: {}", e);
+            return Err(e);
+        } else {
+            println!("Resumed playback");
+        }
 
-        // Wait for the processor to handle the command
+        // Update queue state
+        self.queue_sender.send(QueueCommand::Resume).await?;
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Save state after modification
         self.save_state().await?;
 
-        if let Err(e) = self.emitter.lock().await.resume() {
-            eprintln!("Error resuming: {}", e);
-        } else {
-            println!("Resumed playback");
-        }
         Ok(())
     }
 
     async fn handle_next(&self) -> Result<()> {
+        // Stop current playback first
+        if let Err(e) = self.emitter.lock().await.stop() {
+            eprintln!("Warning: Could not stop playback: {}", e);
+        }
+
+        // Then send next command to queue
         self.queue_sender.send(QueueCommand::Next).await?;
 
         // Wait for the processor to handle the command
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Try to play the next track
+        let queue = self.queue.lock().await;
+        if let Some(track) = queue.get_current_track() {
+            let file_path = track.path.to_string_lossy().to_string();
+            drop(queue);
+
+            let mut emitter = self.emitter.lock().await;
+
+            if let Err(e) = emitter.load_file(&file_path) {
+                eprintln!("Error loading next file {}: {}", file_path, e);
+            } else if let Err(e) = emitter.play() {
+                eprintln!("Error playing next file {}: {}", file_path, e);
+            } else {
+                println!("🎵 Now playing: {}", file_path);
+            }
+        }
 
         // Save state after modification
         self.save_state().await?;
@@ -376,7 +546,7 @@ impl AudioQueueManager {
         self.queue_sender.send(QueueCommand::GetStatus).await?;
 
         // Give queue processor time to handle the command
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Also get direct status from queue for immediate response
         let (state, current_track, queue_size) = {
@@ -393,6 +563,7 @@ impl AudioQueueManager {
                 track.title.as_deref().unwrap_or("Unknown"),
                 track.artist.as_deref().unwrap_or("Unknown Artist"),
                 track.duration.unwrap_or(0.0));
+            println!("File: {}", track.path.display());
         } else {
             println!("No current track");
         }
@@ -404,23 +575,23 @@ impl AudioQueueManager {
     async fn handle_volume(&self, level: f32) -> Result<()> {
         let clamped_level = level.clamp(0.0, 1.0);
 
-        // Wait for the processor to handle the command
-        tokio::time::sleep(Duration::from_millis(50)).await;
-
-        // Save state after modification
-        self.save_state().await?;
-
+        // Set volume on emitter directly
         if let Err(e) = self.emitter.lock().await.set_volume(clamped_level) {
             eprintln!("Error setting volume: {}", e);
         } else {
             println!("Volume set to {:.2}", clamped_level);
         }
+
+        // Save state after modification
+        self.save_state().await?;
+
         Ok(())
     }
 
     async fn handle_start(&self) -> Result<()> {
         println!("Starting AudioQueue daemon...");
         println!("AudioQueue daemon running. Press Ctrl+C to stop.");
+        println!("Use 'audioqueue' commands in another terminal to control playback.");
 
         // Keep the main task alive
         tokio::signal::ctrl_c().await?;
@@ -477,6 +648,12 @@ async fn main() -> Result<()> {
         }
         Commands::Start => {
             manager.handle_start().await?;
+        }
+        Commands::PlayNonBlocking => {
+            manager.handle_play().await?;
+        }
+        Commands::Interactive => {
+            manager.handle_interactive().await?;
         }
     }
 

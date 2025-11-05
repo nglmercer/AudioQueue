@@ -164,7 +164,19 @@ impl AudioQueue {
 
     pub fn extract_metadata<P: AsRef<Path>>(path: P) -> Result<AudioTrack> {
         let path = path.as_ref();
-        let file = std::fs::File::open(path)?;
+
+        // Convert to absolute path
+        let absolute_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .context("Failed to get current directory")?
+                .join(path)
+                .canonicalize()
+                .context("Failed to canonicalize path")?
+        };
+
+        let file = std::fs::File::open(&absolute_path)?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
         let mut hint = Hint::new();
@@ -238,7 +250,7 @@ impl AudioQueue {
         }
 
         Ok(AudioTrack {
-            path: path.to_path_buf(),
+            path: absolute_path,
             title,
             artist,
             duration,
