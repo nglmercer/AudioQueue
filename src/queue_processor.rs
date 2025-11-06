@@ -32,7 +32,7 @@ impl QueueProcessor {
         let mut check_interval = interval(Duration::from_millis(1000));
 
         // Track last known state to detect changes
-        let mut last_track_count = 0;
+        let _last_track_count = 0;
         let mut was_playing = false;
 
         loop {
@@ -113,7 +113,7 @@ impl QueueProcessor {
             QueueCommand::Next => {
                 let mut queue = self.queue.lock().await;
 
-                if queue.next().is_ok() {
+                if queue.next_track().is_ok() {
                     println!("Next track");
                 } else {
                     println!("Already at last track or queue is empty");

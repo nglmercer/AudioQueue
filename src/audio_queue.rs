@@ -106,7 +106,7 @@ impl AudioQueue {
         let state = AudioQueueState {
             tracks: self.tracks.iter().cloned().collect(),
             current_position: self.current_position,
-            playback_state: self.playback_state.clone(),
+            playback_state: self.playback_state,
         };
 
         let content = serde_json::to_string_pretty(&state)
@@ -370,7 +370,7 @@ impl AudioQueue {
         Ok(())
     }
 
-    pub fn next(&mut self) -> Result<()> {
+    pub fn next_track(&mut self) -> Result<()> {
         if self.tracks.is_empty() {
             return Err(anyhow!("Queue is empty"));
         }
@@ -432,7 +432,7 @@ impl AudioQueue {
 
     pub fn get_status(&self) -> (PlaybackState, Option<AudioTrack>, usize) {
         (
-            self.playback_state.clone(),
+            self.playback_state,
             self.get_current_track().cloned(),
             self.tracks.len(),
         )
@@ -545,6 +545,12 @@ impl AudioQueue {
     }
 }
 
+impl Default for AudioQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,7 +594,7 @@ mod tests {
         assert_eq!(queue.get_status().0, PlaybackState::Paused);
 
         // Test navigation
-        queue.next().unwrap();
+        queue.next_track().unwrap();
         assert_eq!(queue.get_current_track().unwrap().title, Some("Test Song 2".to_string()));
 
         queue.previous().unwrap();

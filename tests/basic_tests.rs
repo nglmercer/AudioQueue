@@ -152,7 +152,7 @@ mod tests {
         // Empty queue tests
         assert!(queue.play().is_err());
         assert!(queue.pause().is_err());
-        assert!(queue.next().is_err());
+        assert!(queue.next_track().is_err());
         assert!(queue.previous().is_err());
 
         // Add track
@@ -186,7 +186,7 @@ mod tests {
         assert_eq!(queue.get_current_track().unwrap().path, PathBuf::from("test2.mp3"));
 
         // Next
-        queue.next()?;
+        queue.next_track()?;
         assert_eq!(queue.get_current_track().unwrap().path, PathBuf::from("test3.mp3"));
 
         // Previous
@@ -194,8 +194,8 @@ mod tests {
         assert_eq!(queue.get_current_track().unwrap().path, PathBuf::from("test2.mp3"));
 
         // Next at last track
-        queue.next()?;
-        assert!(queue.next().is_err()); // Should fail at last track
+        queue.next_track()?;
+        assert!(queue.next_track().is_err()); // Should fail at last track
 
         // Previous at first track
         queue.jump_to(0)?;
@@ -436,7 +436,7 @@ mod integration_tests {
 
         // Test navigation
         if queue.get_queue().len() >= 2 {
-            queue.next().unwrap();
+            queue.next_track().unwrap();
             println!("  ✓ Navigation: Next track");
 
             queue.previous().unwrap();

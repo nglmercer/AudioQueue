@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
 use std::path::Path;
+use std::time::{Duration, Instant};
+use std::thread;
 use anyhow::{Result, anyhow};
-use rodio::{OutputStream, OutputStreamHandle, Sink, Decoder, Source};
+use rodio::{OutputStream, OutputStreamHandle, Sink, Decoder};
 use std::io::BufReader;
 use tokio::sync::mpsc::{self, Sender, Receiver};
 
@@ -29,13 +31,23 @@ pub struct AudioEmitter {
     volume: f32,
     current_file: Option<String>,
     position: f64,
+    #[allow(dead_code)]
     duration: Option<f64>,
+    #[allow(dead_code)]
     command_sender: Sender<EmitterCommand>,
+    #[allow(dead_code)]
     command_receiver: Arc<Mutex<Option<Receiver<EmitterCommand>>>>,
     stream_handle: Option<OutputStreamHandle>,
     sink: Option<Arc<Mutex<Sink>>>,
     _stream: Option<OutputStream>, // Keep the stream alive
 }
+
+// Manual implementations of Send and Sync for AudioEmitter
+// Safety: All mutable access to AudioEmitter is protected by Mutex
+// and the only non-Send+Sync field (_stream: OutputStream) is
+// never accessed concurrently
+unsafe impl Send for AudioEmitter {}
+unsafe impl Sync for AudioEmitter {}
 
 impl AudioEmitter {
     pub fn new() -> Result<Self> {
@@ -147,6 +159,48 @@ impl AudioEmitter {
         Ok(())
     }
 
+    /// Play audio and wait for it to complete
+    /// This keeps the process alive until the audio finishes playing
+    #[allow(dead_code)]
+    pub fn play_and_wait(&mut self) -> Result<()> {
+        self.play()?;
+
+        if let Some(sink) = &self.sink {
+            // Clone the sink to avoid holding the lock across await
+            let sink_clone = Arc::clone(sink);
+
+            // Use a simple blocking approach with timeout
+            let start_time = Instant::now();
+            let timeout = Duration::from_secs(600); // 10 minutes timeout
+
+            loop {
+                {
+                    let sink_guard = sink_clone.lock().unwrap();
+                    if sink_guard.empty() {
+                        println!("Audio playback completed");
+                        self.state = EmitterState::Stopped;
+                        return Ok(());
+                    }
+
+                    // Check timeout
+                    if start_time.elapsed() > timeout {
+                        println!("Playback timeout reached");
+                        sink_guard.stop();
+                        self.state = EmitterState::Stopped;
+                        return Err(anyhow!("Playback timeout after 10 minutes"));
+                    }
+                }
+
+                // Sleep briefly to avoid busy-waiting
+                thread::sleep(Duration::from_millis(100));
+            }
+        } else {
+            Err(anyhow!("No audio sink available"))
+        }
+    }
+
+
+
     pub fn pause(&mut self) -> Result<()> {
         if let Some(sink) = &self.sink {
             sink.lock().unwrap().pause();
@@ -196,10 +250,12 @@ impl AudioEmitter {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn get_status(&self) -> (&EmitterState, Option<&String>, f32, f64, Option<f64>) {
         (&self.state, self.current_file.as_ref(), self.volume, self.position, self.duration)
     }
 
+    #[allow(dead_code)]
     pub fn is_finished(&self) -> bool {
         if let Some(sink) = &self.sink {
             let sink_guard = sink.lock().unwrap();
@@ -209,6 +265,7 @@ impl AudioEmitter {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn process_commands(&mut self) -> Result<()> {
         let mut receiver = {
             let mut guard = self.command_receiver.lock().unwrap();

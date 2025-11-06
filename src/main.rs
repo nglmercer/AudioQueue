@@ -84,6 +84,7 @@ struct AudioQueueManager {
     queue: Arc<Mutex<AudioQueue>>,
     emitter: Arc<Mutex<AudioEmitter>>,
     queue_sender: mpsc::Sender<QueueCommand>,
+    #[allow(dead_code)]
     emitter_sender: mpsc::Sender<EmitterCommand>,
     _processor_handle: tokio::task::JoinHandle<()>, // Keep processor alive
     state_file: PathBuf, // Persistent state file
